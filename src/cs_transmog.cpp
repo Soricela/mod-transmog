@@ -110,6 +110,15 @@ public:
 
         handler->PSendSysMessage("WARDROBE_CATALOG_BEGIN:{}:{}", slot, page);
 
+        for (uint8 equipmentSlot = EQUIPMENT_SLOT_START; equipmentSlot < EQUIPMENT_SLOT_END; ++equipmentSlot)
+        {
+            if (Item* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, equipmentSlot))
+            {
+                if (uint32 fakeEntry = sTransmogrification->GetFakeEntry(item->GetGUID()))
+                    handler->PSendSysMessage("WARDROBE_ACTIVE:{}:{}", uint32(equipmentSlot), fakeEntry);
+            }
+        }
+
         Item* destination = player->GetItemByPos(INVENTORY_SLOT_BAG_0, uint8(slot));
         if (!destination)
         {
