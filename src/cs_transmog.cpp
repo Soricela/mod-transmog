@@ -45,6 +45,7 @@ public:
         static ChatCommandTable wardrobeTable =
         {
             { "apply",  HandleWardrobeApply,  SEC_PLAYER, Console::No },
+            { "catalog", HandleWardrobeCatalog, SEC_PLAYER, Console::No },
             { "remove", HandleWardrobeRemove, SEC_PLAYER, Console::No },
             { "sync",   HandleWardrobeSync,   SEC_PLAYER, Console::No },
         };
@@ -80,9 +81,6 @@ public:
             return true;
         }
 
-        uint32 accountId = player->GetSession()->GetAccountId();
-        Item* destination = player->GetItemByPos(INVENTORY_SLOT_BAG_0, uint8(slot));
-
         handler->PSendSysMessage("WARDROBE_SYNC_BEGIN:{}", slot);
 
         for (uint8 equipmentSlot = EQUIPMENT_SLOT_START; equipmentSlot < EQUIPMENT_SLOT_END; ++equipmentSlot)
@@ -94,19 +92,59 @@ public:
             }
         }
 
-        std::string prefix = "WARDROBE_SYNC:" + std::to_string(slot) + ':';
-        std::string batch = prefix;
-        auto collectionItr = sTransmogrification->collectionCache.find(accountId);
-        if (destination && collectionItr != sTransmogrification->collectionCache.end())
+        handler->PSendSysMessage("WARDROBE_SYNC_END:{}", slot);
+        return true;
+    }
+
+    static bool HandleWardrobeCatalog(ChatHandler* handler, uint32 slot, uint32 page)
+    {
+        constexpr uint32 WardrobePageSize = 30;
+        constexpr uint32 WardrobeMaxPage = 10000;
+
+        Player* player = handler->GetPlayer();
+        if (slot >= EQUIPMENT_SLOT_END || page > WardrobeMaxPage)
         {
-            std::unordered_set<uint32> displays;
-            for (uint32 itemId : collectionItr->second)
+            handler->PSendSysMessage("WARDROBE_RESULT:{}:{}", slot, uint32(LANG_TRANSMOG_INVALID_SLOT));
+            return true;
+        }
+
+        handler->PSendSysMessage("WARDROBE_CATALOG_BEGIN:{}:{}", slot, page);
+
+        Item* destination = player->GetItemByPos(INVENTORY_SLOT_BAG_0, uint8(slot));
+        if (!destination)
+        {
+            handler->PSendSysMessage("WARDROBE_CATALOG_END:{}:{}:0", slot, page);
+            return true;
+        }
+
+        uint64 const entriesToSkip = uint64(page) * WardrobePageSize;
+        uint64 compatibleEntries = 0;
+        uint32 entriesSent = 0;
+        bool hasMore = false;
+        std::unordered_set<uint32> displays;
+        std::string const prefix = "WARDROBE_CATALOG:" + std::to_string(slot) + ':' + std::to_string(page) + ':';
+        std::string batch = prefix;
+
+        QueryResult result = WorldDatabase.Query("SELECT entry FROM item_template WHERE displayid <> 0 ORDER BY entry");
+        if (result)
+        {
+            do
             {
+                uint32 itemId = result->Fetch()[0].Get<uint32>();
                 ItemTemplate const* source = sObjectMgr->GetItemTemplate(itemId);
                 if (!source ||
                     !sTransmogrification->CanTransmogrifyItemWithItem(player, destination->GetTemplate(), source) ||
                     !displays.insert(source->DisplayInfoID).second)
                     continue;
+
+                if (compatibleEntries++ < entriesToSkip)
+                    continue;
+
+                if (entriesSent == WardrobePageSize)
+                {
+                    hasMore = true;
+                    break;
+                }
 
                 std::string token = std::to_string(itemId);
                 if (batch.size() + token.size() + 1 > 220)
@@ -118,13 +156,14 @@ public:
                 if (batch.size() > prefix.size())
                     batch += ',';
                 batch += token;
-            }
+                ++entriesSent;
+            } while (result->NextRow());
         }
 
         if (batch.size() > prefix.size())
             handler->PSendSysMessage("{}", batch);
 
-        handler->PSendSysMessage("WARDROBE_SYNC_END:{}", slot);
+        handler->PSendSysMessage("WARDROBE_CATALOG_END:{}:{}:{}", slot, page, uint32(hasMore));
         return true;
     }
 
@@ -137,16 +176,8 @@ public:
             return true;
         }
 
-        uint32 accountId = player->GetSession()->GetAccountId();
-        auto collectionItr = sTransmogrification->collectionCache.find(accountId);
-        if (!sTransmogrification->GetUseCollectionSystem() ||
-            collectionItr == sTransmogrification->collectionCache.end() ||
-            !collectionItr->second.contains(itemId))
-        {
-            handler->PSendSysMessage("WARDROBE_RESULT:{}:COLLECTION", slot);
-            return true;
-        }
-
+        // The wardrobe catalogue is server-authorized. Transmogrify still validates
+        // the destination, item eligibility, slot compatibility and configured costs.
         TransmogStrings result = sTransmogrification->Transmogrify(player, itemId, uint8(slot));
         handler->PSendSysMessage("WARDROBE_RESULT:{}:{}", slot, uint32(result));
         return true;
