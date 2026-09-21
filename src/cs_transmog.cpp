@@ -24,6 +24,8 @@
 #include "ScriptMgr.h"
 #include "SpellMgr.h"
 #include "Transmogrification.h"
+#include <string>
+#include <unordered_set>
 
 using namespace Acore::ChatCommands;
 
@@ -40,10 +42,18 @@ public:
             { "",    HandleAddTransmogItem,       SEC_MODERATOR, Console::Yes },
         };
 
+        static ChatCommandTable wardrobeTable =
+        {
+            { "apply",  HandleWardrobeApply,  SEC_PLAYER, Console::No },
+            { "remove", HandleWardrobeRemove, SEC_PLAYER, Console::No },
+            { "sync",   HandleWardrobeSync,   SEC_PLAYER, Console::No },
+        };
+
         static ChatCommandTable transmogTable =
         {
             { "add",        addCollectionTable                                              },
             { "check",      HandleCheckTransmog,           SEC_GAMEMASTER,    Console::Yes },
+            { "wardrobe",   wardrobeTable                                                    },
             { "",           HandleDisableTransMogVisual,   SEC_PLAYER,        Console::No  },
             { "sync",       HandleSyncTransMogCommand,     SEC_PLAYER,        Console::No  },
             { "portable",   HandleTransmogPortableCommand, SEC_PLAYER,        Console::No  },
@@ -59,6 +69,114 @@ public:
         };
 
         return commandTable;
+    }
+
+    static bool HandleWardrobeSync(ChatHandler* handler, uint32 slot)
+    {
+        Player* player = handler->GetPlayer();
+        if (slot >= EQUIPMENT_SLOT_END)
+        {
+            handler->PSendSysMessage("WARDROBE_RESULT:{}:{}", slot, uint32(LANG_TRANSMOG_INVALID_SLOT));
+            return true;
+        }
+
+        uint32 accountId = player->GetSession()->GetAccountId();
+        Item* destination = player->GetItemByPos(INVENTORY_SLOT_BAG_0, uint8(slot));
+
+        handler->PSendSysMessage("WARDROBE_SYNC_BEGIN:{}", slot);
+
+        for (uint8 equipmentSlot = EQUIPMENT_SLOT_START; equipmentSlot < EQUIPMENT_SLOT_END; ++equipmentSlot)
+        {
+            if (Item* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, equipmentSlot))
+            {
+                if (uint32 fakeEntry = sTransmogrification->GetFakeEntry(item->GetGUID()))
+                    handler->PSendSysMessage("WARDROBE_ACTIVE:{}:{}", uint32(equipmentSlot), fakeEntry);
+            }
+        }
+
+        std::string prefix = "WARDROBE_SYNC:" + std::to_string(slot) + ':';
+        std::string batch = prefix;
+        auto collectionItr = sTransmogrification->collectionCache.find(accountId);
+        if (destination && collectionItr != sTransmogrification->collectionCache.end())
+        {
+            std::unordered_set<uint32> displays;
+            for (uint32 itemId : collectionItr->second)
+            {
+                ItemTemplate const* source = sObjectMgr->GetItemTemplate(itemId);
+                if (!source ||
+                    !sTransmogrification->CanTransmogrifyItemWithItem(player, destination->GetTemplate(), source) ||
+                    !displays.insert(source->DisplayInfoID).second)
+                    continue;
+
+                std::string token = std::to_string(itemId);
+                if (batch.size() + token.size() + 1 > 220)
+                {
+                    handler->PSendSysMessage("{}", batch);
+                    batch = prefix;
+                }
+
+                if (batch.size() > prefix.size())
+                    batch += ',';
+                batch += token;
+            }
+        }
+
+        if (batch.size() > prefix.size())
+            handler->PSendSysMessage("{}", batch);
+
+        handler->PSendSysMessage("WARDROBE_SYNC_END:{}", slot);
+        return true;
+    }
+
+    static bool HandleWardrobeApply(ChatHandler* handler, uint32 slot, uint32 itemId)
+    {
+        Player* player = handler->GetPlayer();
+        if (slot >= EQUIPMENT_SLOT_END)
+        {
+            handler->PSendSysMessage("WARDROBE_RESULT:{}:{}", slot, uint32(LANG_TRANSMOG_INVALID_SLOT));
+            return true;
+        }
+
+        uint32 accountId = player->GetSession()->GetAccountId();
+        auto collectionItr = sTransmogrification->collectionCache.find(accountId);
+        if (!sTransmogrification->GetUseCollectionSystem() ||
+            collectionItr == sTransmogrification->collectionCache.end() ||
+            !collectionItr->second.contains(itemId))
+        {
+            handler->PSendSysMessage("WARDROBE_RESULT:{}:COLLECTION", slot);
+            return true;
+        }
+
+        TransmogStrings result = sTransmogrification->Transmogrify(player, itemId, uint8(slot));
+        handler->PSendSysMessage("WARDROBE_RESULT:{}:{}", slot, uint32(result));
+        return true;
+    }
+
+    static bool HandleWardrobeRemove(ChatHandler* handler, uint32 slot)
+    {
+        Player* player = handler->GetPlayer();
+        if (slot >= EQUIPMENT_SLOT_END)
+        {
+            handler->PSendSysMessage("WARDROBE_RESULT:{}:{}", slot, uint32(LANG_TRANSMOG_INVALID_SLOT));
+            return true;
+        }
+
+        Item* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, uint8(slot));
+        if (!item)
+        {
+            handler->PSendSysMessage("WARDROBE_RESULT:{}:{}", slot, uint32(LANG_TRANSMOG_MISSING_DEST_ITEM));
+            return true;
+        }
+
+        if (!sTransmogrification->GetFakeEntry(item->GetGUID()))
+        {
+            handler->PSendSysMessage("WARDROBE_RESULT:{}:{}", slot, uint32(LANG_TRANSMOG_UNTRANSMOG_NO_TRANSMOGS));
+            return true;
+        }
+
+        sTransmogrification->DeleteFakeEntry(player, uint8(slot), item);
+        handler->PSendSysMessage("WARDROBE_RESULT:{}:{}", slot, uint32(LANG_TRANSMOG_UNTRANSMOG_OK));
+        return true;
     }
 
     static bool HandleSyncTransMogCommand(ChatHandler* handler)
