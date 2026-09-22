@@ -44,10 +44,11 @@ public:
 
         static ChatCommandTable wardrobeTable =
         {
-            { "apply",  HandleWardrobeApply,  SEC_PLAYER, Console::No },
+            { "apply",   HandleWardrobeApply,   SEC_PLAYER, Console::No },
+            { "browse",  HandleWardrobeBrowse,  SEC_PLAYER, Console::No },
             { "catalog", HandleWardrobeCatalog, SEC_PLAYER, Console::No },
-            { "remove", HandleWardrobeRemove, SEC_PLAYER, Console::No },
-            { "sync",   HandleWardrobeSync,   SEC_PLAYER, Console::No },
+            { "remove",  HandleWardrobeRemove,  SEC_PLAYER, Console::No },
+            { "sync",    HandleWardrobeSync,    SEC_PLAYER, Console::No },
         };
 
         static ChatCommandTable transmogTable =
@@ -96,7 +97,87 @@ public:
         return true;
     }
 
-    static bool HandleWardrobeCatalog(ChatHandler* handler, uint32 slot, uint32 page)
+    static void SendWardrobeActive(ChatHandler* handler, Player* player)
+    {
+        for (uint8 equipmentSlot = EQUIPMENT_SLOT_START; equipmentSlot < EQUIPMENT_SLOT_END; ++equipmentSlot)
+        {
+            if (Item* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, equipmentSlot))
+            {
+                if (uint32 fakeEntry = sTransmogrification->GetFakeEntry(item->GetGUID()))
+                    handler->PSendSysMessage("WARDROBE_ACTIVE:{}:{}", uint32(equipmentSlot), fakeEntry);
+            }
+        }
+    }
+
+    static bool IsWardrobeInventoryType(uint32 slot, uint32 inventoryType)
+    {
+        switch (slot)
+        {
+            case EQUIPMENT_SLOT_HEAD:     return inventoryType == INVTYPE_HEAD;
+            case EQUIPMENT_SLOT_SHOULDERS:return inventoryType == INVTYPE_SHOULDERS;
+            case EQUIPMENT_SLOT_BACK:     return inventoryType == INVTYPE_CLOAK;
+            case EQUIPMENT_SLOT_CHEST:    return inventoryType == INVTYPE_CHEST || inventoryType == INVTYPE_ROBE;
+            case EQUIPMENT_SLOT_TABARD:   return inventoryType == INVTYPE_TABARD;
+            case EQUIPMENT_SLOT_BODY:     return inventoryType == INVTYPE_BODY;
+            case EQUIPMENT_SLOT_WRISTS:   return inventoryType == INVTYPE_WRISTS;
+            case EQUIPMENT_SLOT_HANDS:    return inventoryType == INVTYPE_HANDS;
+            case EQUIPMENT_SLOT_WAIST:    return inventoryType == INVTYPE_WAIST;
+            case EQUIPMENT_SLOT_LEGS:     return inventoryType == INVTYPE_LEGS;
+            case EQUIPMENT_SLOT_FEET:     return inventoryType == INVTYPE_FEET;
+            case EQUIPMENT_SLOT_RANGED:   return inventoryType == INVTYPE_RANGED || inventoryType == INVTYPE_RANGEDRIGHT || inventoryType == INVTYPE_THROWN;
+            case EQUIPMENT_SLOT_MAINHAND: return inventoryType == INVTYPE_WEAPON || inventoryType == INVTYPE_2HWEAPON || inventoryType == INVTYPE_WEAPONMAINHAND;
+            case EQUIPMENT_SLOT_OFFHAND:  return inventoryType == INVTYPE_WEAPON || inventoryType == INVTYPE_WEAPONOFFHAND || inventoryType == INVTYPE_SHIELD || inventoryType == INVTYPE_HOLDABLE;
+            default:                      return false;
+        }
+    }
+
+    static bool IsArmorWardrobeSlot(uint32 slot)
+    {
+        return slot == EQUIPMENT_SLOT_HEAD || slot == EQUIPMENT_SLOT_SHOULDERS ||
+            slot == EQUIPMENT_SLOT_BACK || slot == EQUIPMENT_SLOT_CHEST ||
+            slot == EQUIPMENT_SLOT_WRISTS || slot == EQUIPMENT_SLOT_HANDS ||
+            slot == EQUIPMENT_SLOT_WAIST || slot == EQUIPMENT_SLOT_LEGS ||
+            slot == EQUIPMENT_SLOT_FEET;
+    }
+
+    static uint32 GetArmorSubclassForPlayer(Player const* player)
+    {
+        switch (player->getClass())
+        {
+            case CLASS_WARRIOR:
+            case CLASS_PALADIN:
+            case CLASS_DEATH_KNIGHT:
+                return ITEM_SUBCLASS_ARMOR_PLATE;
+            case CLASS_HUNTER:
+            case CLASS_SHAMAN:
+                return ITEM_SUBCLASS_ARMOR_MAIL;
+            case CLASS_ROGUE:
+            case CLASS_DRUID:
+                return ITEM_SUBCLASS_ARMOR_LEATHER;
+            default:
+                return ITEM_SUBCLASS_ARMOR_CLOTH;
+        }
+    }
+
+    static bool IsWardrobeBrowseCandidate(Player const* player, ItemTemplate const* destination, uint32 slot, ItemTemplate const* source)
+    {
+        if (!source || !source->DisplayInfoID || !IsWardrobeInventoryType(slot, source->InventoryType))
+            return false;
+
+        // Browse ignores class, race and level requirements, but armour remains in
+        // the character's armour family so a cloth character sees cloth appearances.
+        if (IsArmorWardrobeSlot(slot) && source->Class == ITEM_CLASS_ARMOR)
+        {
+            uint32 armorSubclass = GetArmorSubclassForPlayer(player);
+            if (destination && destination->Class == ITEM_CLASS_ARMOR)
+                armorSubclass = destination->SubClass;
+            return source->SubClass == armorSubclass;
+        }
+
+        return true;
+    }
+
+    static bool SendWardrobeCatalog(ChatHandler* handler, uint32 slot, uint32 page, bool browse)
     {
         constexpr uint32 WardrobePageSize = 30;
         constexpr uint32 WardrobeMaxPage = 10000;
@@ -110,17 +191,10 @@ public:
 
         handler->PSendSysMessage("WARDROBE_CATALOG_BEGIN:{}:{}", slot, page);
 
-        for (uint8 equipmentSlot = EQUIPMENT_SLOT_START; equipmentSlot < EQUIPMENT_SLOT_END; ++equipmentSlot)
-        {
-            if (Item* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, equipmentSlot))
-            {
-                if (uint32 fakeEntry = sTransmogrification->GetFakeEntry(item->GetGUID()))
-                    handler->PSendSysMessage("WARDROBE_ACTIVE:{}:{}", uint32(equipmentSlot), fakeEntry);
-            }
-        }
+        SendWardrobeActive(handler, player);
 
         Item* destination = player->GetItemByPos(INVENTORY_SLOT_BAG_0, uint8(slot));
-        if (!destination)
+        if (!browse && !destination)
         {
             handler->PSendSysMessage("WARDROBE_CATALOG_END:{}:{}:0", slot, page);
             return true;
@@ -142,7 +216,8 @@ public:
                 uint32 itemId = result->Fetch()[0].Get<uint32>();
                 ItemTemplate const* source = sObjectMgr->GetItemTemplate(itemId);
                 if (!source ||
-                    !sTransmogrification->CanTransmogrifyItemWithItem(player, destination->GetTemplate(), source) ||
+                    (browse ? !IsWardrobeBrowseCandidate(player, destination ? destination->GetTemplate() : nullptr, slot, source)
+                            : !sTransmogrification->CanTransmogrifyItemWithItem(player, destination->GetTemplate(), source)) ||
                     !displays.insert(source->DisplayInfoID).second)
                     continue;
 
@@ -174,6 +249,16 @@ public:
 
         handler->PSendSysMessage("WARDROBE_CATALOG_END:{}:{}:{}", slot, page, uint32(hasMore));
         return true;
+    }
+
+    static bool HandleWardrobeCatalog(ChatHandler* handler, uint32 slot, uint32 page)
+    {
+        return SendWardrobeCatalog(handler, slot, page, false);
+    }
+
+    static bool HandleWardrobeBrowse(ChatHandler* handler, uint32 slot, uint32 page)
+    {
+        return SendWardrobeCatalog(handler, slot, page, true);
     }
 
     static bool HandleWardrobeApply(ChatHandler* handler, uint32 slot, uint32 itemId)
