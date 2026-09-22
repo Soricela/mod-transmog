@@ -139,45 +139,21 @@ public:
     {
         return slot == EQUIPMENT_SLOT_HEAD || slot == EQUIPMENT_SLOT_SHOULDERS ||
             slot == EQUIPMENT_SLOT_BACK || slot == EQUIPMENT_SLOT_CHEST ||
+            slot == EQUIPMENT_SLOT_TABARD || slot == EQUIPMENT_SLOT_BODY ||
             slot == EQUIPMENT_SLOT_WRISTS || slot == EQUIPMENT_SLOT_HANDS ||
             slot == EQUIPMENT_SLOT_WAIST || slot == EQUIPMENT_SLOT_LEGS ||
             slot == EQUIPMENT_SLOT_FEET;
     }
 
-    static uint32 GetArmorSubclassForPlayer(Player const* player)
-    {
-        switch (player->getClass())
-        {
-            case CLASS_WARRIOR:
-            case CLASS_PALADIN:
-            case CLASS_DEATH_KNIGHT:
-                return ITEM_SUBCLASS_ARMOR_PLATE;
-            case CLASS_HUNTER:
-            case CLASS_SHAMAN:
-                return ITEM_SUBCLASS_ARMOR_MAIL;
-            case CLASS_ROGUE:
-            case CLASS_DRUID:
-                return ITEM_SUBCLASS_ARMOR_LEATHER;
-            default:
-                return ITEM_SUBCLASS_ARMOR_CLOTH;
-        }
-    }
-
-    static bool IsWardrobeBrowseCandidate(Player const* player, ItemTemplate const* destination, uint32 slot, ItemTemplate const* source)
+    static bool IsWardrobeBrowseCandidate(Player const* /*player*/, ItemTemplate const* /*destination*/, uint32 slot, ItemTemplate const* source)
     {
         if (!source || !source->DisplayInfoID || !IsWardrobeInventoryType(slot, source->InventoryType))
             return false;
 
-        // Browse ignores class, race and level requirements, but armour remains in
-        // the character's armour family so a cloth character sees cloth appearances.
-        if (IsArmorWardrobeSlot(slot) && source->Class == ITEM_CLASS_ARMOR)
-        {
-            uint32 armorSubclass = GetArmorSubclassForPlayer(player);
-            if (destination && destination->Class == ITEM_CLASS_ARMOR)
-                armorSubclass = destination->SubClass;
-            return source->SubClass == armorSubclass;
-        }
-
+        // Wardrobe exploration is visual: keep the exact equipment slot, but
+        // deliberately ignore class, race, level and armour material.  Thus a
+        // warrior can browse cloth/leather/mail/plate (and shirts/tabards) for
+        // the currently equipped visual slot.
         return true;
     }
 
