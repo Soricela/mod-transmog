@@ -181,6 +181,52 @@ public:
         return true;
     }
 
+    static bool IsWardrobeVisualArmor(ItemTemplate const* destination, uint32 slot, ItemTemplate const* source)
+    {
+        // Wardrobe visual mode intentionally ignores class, race, level and
+        // armour subclass.  It still requires an armour appearance in the
+        // exact equipped visual slot, so a chest cannot be used as trousers.
+        return destination && source && source->DisplayInfoID &&
+            IsArmorWardrobeSlot(slot) &&
+            destination->Class == ITEM_CLASS_ARMOR &&
+            source->Class == ITEM_CLASS_ARMOR &&
+            IsWardrobeInventoryType(slot, source->InventoryType);
+    }
+
+    static TransmogStrings ApplyWardrobeVisualArmor(Player* player, Item* destination, uint32 slot, ItemTemplate const* source)
+    {
+        if (!IsWardrobeVisualArmor(destination ? destination->GetTemplate() : nullptr, slot, source))
+            return LANG_TRANSMOG_INVALID_ITEMS;
+
+        // Preserve the module's configured token and gold cost.  Only its
+        // class/material compatibility check is bypassed for visual armour.
+        if (sTransmogrification->GetRequireToken())
+        {
+            uint32 tokenEntry = sTransmogrification->GetTokenEntry();
+            uint32 tokenAmount = sTransmogrification->GetTokenAmount();
+            if (!player->HasItemCount(tokenEntry, tokenAmount))
+                return LANG_TRANSMOG_NOT_ENOUGH_TOKENS;
+            player->DestroyItemCount(tokenEntry, tokenAmount, true);
+        }
+
+        int32 cost = sTransmogrification->GetSpecialPrice(destination->GetTemplate());
+        cost = int32(float(cost) * sTransmogrification->GetScaledCostModifier());
+        cost += sTransmogrification->GetCopperCost();
+        if (cost > 0)
+        {
+            if (!player->HasEnoughMoney(cost))
+                return LANG_TRANSMOG_NOT_ENOUGH_MONEY;
+            player->ModifyMoney(-cost, false);
+        }
+
+        sTransmogrification->SetFakeEntry(player, source->ItemId, uint8(slot), destination);
+        destination->UpdatePlayedTime(player);
+        destination->SetOwnerGUID(player->GetGUID());
+        destination->SetNotRefundable(player);
+        destination->ClearSoulboundTradeable(player);
+        return LANG_TRANSMOG_OK;
+    }
+
     static std::string NormalizeWardrobeSearch(std::string search)
     {
         if (search == "-")
@@ -319,9 +365,15 @@ public:
             return true;
         }
 
-        // The wardrobe catalogue is server-authorized. Transmogrify still validates
-        // the destination, item eligibility, slot compatibility and configured costs.
-        TransmogStrings result = sTransmogrification->Transmogrify(player, itemId, uint8(slot));
+        Item* destination = player->GetItemByPos(INVENTORY_SLOT_BAG_0, uint8(slot));
+        ItemTemplate const* source = sObjectMgr->GetItemTemplate(itemId);
+
+        // Let wardrobe exploration apply any armour material (cloth, leather,
+        // mail or plate) to its correct visual slot.  Weapons and all other
+        // item families retain the module's regular safety rules.
+        TransmogStrings result = IsWardrobeVisualArmor(destination ? destination->GetTemplate() : nullptr, slot, source)
+            ? ApplyWardrobeVisualArmor(player, destination, slot, source)
+            : sTransmogrification->Transmogrify(player, itemId, uint8(slot));
         handler->PSendSysMessage("WARDROBE_RESULT:{}:{}", slot, uint32(result));
         return true;
     }
