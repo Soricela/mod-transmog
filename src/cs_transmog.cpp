@@ -24,8 +24,12 @@
 #include "ScriptMgr.h"
 #include "SpellMgr.h"
 #include "Transmogrification.h"
+#include <algorithm>
+#include <cctype>
 #include <string>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 using namespace Acore::ChatCommands;
 
@@ -177,7 +181,35 @@ public:
         return true;
     }
 
-    static bool SendWardrobeCatalog(ChatHandler* handler, uint32 slot, uint32 page, bool browse)
+    static std::string NormalizeWardrobeSearch(std::string search)
+    {
+        if (search == "-")
+            return {};
+
+        std::replace(search.begin(), search.end(), '+', ' ');
+        if (search.size() > 32)
+            search.resize(32);
+        std::transform(search.begin(), search.end(), search.begin(), [](unsigned char character)
+        {
+            return char(std::tolower(character));
+        });
+        return search;
+    }
+
+    static bool WardrobeNameMatches(ItemTemplate const* source, std::string const& search)
+    {
+        if (search.empty())
+            return true;
+
+        std::string name = source->Name1;
+        std::transform(name.begin(), name.end(), name.begin(), [](unsigned char character)
+        {
+            return char(std::tolower(character));
+        });
+        return name.find(search) != std::string::npos;
+    }
+
+    static bool SendWardrobeCatalog(ChatHandler* handler, uint32 slot, uint32 page, bool browse, uint32 qualityFilter, uint32 sortOrder, std::string search)
     {
         constexpr uint32 WardrobePageSize = 30;
         constexpr uint32 WardrobeMaxPage = 10000;
@@ -196,15 +228,18 @@ public:
         Item* destination = player->GetItemByPos(INVENTORY_SLOT_BAG_0, uint8(slot));
         if (!browse && !destination)
         {
+            handler->PSendSysMessage("WARDROBE_CATALOG_TOTAL:{}:{}:0", slot, page);
             handler->PSendSysMessage("WARDROBE_CATALOG_END:{}:{}:0", slot, page);
             return true;
         }
 
+        qualityFilter = qualityFilter <= ITEM_QUALITY_HEIRLOOM ? qualityFilter : 0;
+        sortOrder = sortOrder <= 3 ? sortOrder : 0;
+        search = NormalizeWardrobeSearch(std::move(search));
+
         uint64 const entriesToSkip = uint64(page) * WardrobePageSize;
-        uint64 compatibleEntries = 0;
-        uint32 entriesSent = 0;
-        bool hasMore = false;
         std::unordered_set<uint32> displays;
+        std::vector<ItemTemplate const*> candidates;
         std::string const prefix = "WARDROBE_CATALOG:" + std::to_string(slot) + ':' + std::to_string(page) + ':';
         std::string batch = prefix;
 
@@ -218,47 +253,61 @@ public:
                 if (!source ||
                     (browse ? !IsWardrobeBrowseCandidate(player, destination ? destination->GetTemplate() : nullptr, slot, source)
                             : !sTransmogrification->CanTransmogrifyItemWithItem(player, destination->GetTemplate(), source)) ||
+                    (qualityFilter && source->Quality != qualityFilter) ||
+                    !WardrobeNameMatches(source, search) ||
                     !displays.insert(source->DisplayInfoID).second)
                     continue;
 
-                if (compatibleEntries++ < entriesToSkip)
-                    continue;
-
-                if (entriesSent == WardrobePageSize)
-                {
-                    hasMore = true;
-                    break;
-                }
-
-                std::string token = std::to_string(itemId);
-                if (batch.size() + token.size() + 1 > 220)
-                {
-                    handler->PSendSysMessage("{}", batch);
-                    batch = prefix;
-                }
-
-                if (batch.size() > prefix.size())
-                    batch += ',';
-                batch += token;
-                ++entriesSent;
+                candidates.push_back(source);
             } while (result->NextRow());
+        }
+
+        std::sort(candidates.begin(), candidates.end(), [sortOrder](ItemTemplate const* left, ItemTemplate const* right)
+        {
+            if (sortOrder == 1)
+                return left->Name1 == right->Name1 ? left->ItemId < right->ItemId : left->Name1 < right->Name1;
+            if (sortOrder == 2)
+                return left->Quality == right->Quality ? left->ItemId < right->ItemId : left->Quality > right->Quality;
+            if (sortOrder == 3)
+                return left->ItemLevel == right->ItemLevel ? left->ItemId < right->ItemId : left->ItemLevel > right->ItemLevel;
+            return left->ItemId < right->ItemId;
+        });
+
+        handler->PSendSysMessage("WARDROBE_CATALOG_TOTAL:{}:{}:{}", slot, page, uint32(candidates.size()));
+
+        uint32 entriesSent = 0;
+        for (uint64 index = entriesToSkip; index < candidates.size() && entriesSent < WardrobePageSize; ++index)
+        {
+            uint32 itemId = candidates[index]->ItemId;
+
+            std::string token = std::to_string(itemId);
+            if (batch.size() + token.size() + 1 > 220)
+            {
+                handler->PSendSysMessage("{}", batch);
+                batch = prefix;
+            }
+
+            if (batch.size() > prefix.size())
+                batch += ',';
+            batch += token;
+            ++entriesSent;
         }
 
         if (batch.size() > prefix.size())
             handler->PSendSysMessage("{}", batch);
 
-        handler->PSendSysMessage("WARDROBE_CATALOG_END:{}:{}:{}", slot, page, uint32(hasMore));
+        handler->PSendSysMessage("WARDROBE_CATALOG_END:{}:{}:{}", slot, page, uint32(entriesToSkip + entriesSent < candidates.size()));
         return true;
     }
 
-    static bool HandleWardrobeCatalog(ChatHandler* handler, uint32 slot, uint32 page)
+    static bool HandleWardrobeCatalog(ChatHandler* handler, uint32 slot, uint32 page, uint32 qualityFilter, uint32 sortOrder, std::string search)
     {
-        return SendWardrobeCatalog(handler, slot, page, false);
+        return SendWardrobeCatalog(handler, slot, page, false, qualityFilter, sortOrder, std::move(search));
     }
 
-    static bool HandleWardrobeBrowse(ChatHandler* handler, uint32 slot, uint32 page)
+    static bool HandleWardrobeBrowse(ChatHandler* handler, uint32 slot, uint32 page, uint32 qualityFilter, uint32 sortOrder, std::string search)
     {
-        return SendWardrobeCatalog(handler, slot, page, true);
+        return SendWardrobeCatalog(handler, slot, page, true, qualityFilter, sortOrder, std::move(search));
     }
 
     static bool HandleWardrobeApply(ChatHandler* handler, uint32 slot, uint32 itemId)
